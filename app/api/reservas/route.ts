@@ -1,11 +1,12 @@
 // app/api/reservas/route.ts
 import { NextResponse } from 'next/server';
-import prisma from '@/lib/prisma'; // Certifique-se que este import está funcionando
+import prisma from '@/lib/prisma'; // Seu cliente Prisma de lib/prisma.ts
 import { z } from 'zod';
 
-const DURACAO_RESERVA_PADRAO_MS = 2 * 60 * 60 * 1000; // 2 horas
+const DURACAO_RESERVA_PADRAO_MS = 2 * 60 * 60 * 1000; // 2 horas como padrão
 const TOLERANCIA_ATRASO_MS = 15 * 60 * 1000; // 15 minutos
 
+// Esquema de validação para criar uma reserva
 const criarReservaSchema = z.object({
   nome: z.string().min(1, { message: "Nome é obrigatório" }),
   data: z.string().refine((val) => {
@@ -20,11 +21,13 @@ const criarReservaSchema = z.object({
   pessoas: z.coerce.number().int().positive({ message: "Número de pessoas deve ser um inteiro positivo" }),
 });
 
-// Helper para verificar se uma reserva pode ser considerada "liberada" por atraso
+// Função helper para verificar se uma reserva "confirmada" pode ser considerada liberada por atraso
 function isReservaLiberadaPorAtraso(reserva: { dataHoraInicio: Date, status: string }): boolean {
   if (reserva.status === "confirmada") {
     const agora = new Date();
-    const limiteTolerancia = new Date(new Date(reserva.dataHoraInicio).getTime() + TOLERANCIA_ATRASO_MS);
+    // Certifique-se que reserva.dataHoraInicio é um objeto Date
+    const inicioReserva = new Date(reserva.dataHoraInicio);
+    const limiteTolerancia = new Date(inicioReserva.getTime() + TOLERANCIA_ATRASO_MS);
     if (agora > limiteTolerancia) {
       return true; // Passou da tolerância e não houve check-in
     }
@@ -39,7 +42,7 @@ export async function GET(request: Request) {
   const incluirPassadas = searchParams.get('incluirPassadas') === 'true';
 
   try {
-    const whereClause: any = {};
+    const whereClause: any = {}; // Usar 'any' temporariamente para flexibilidade ou criar um tipo mais específico
     const orderByClause: any = { dataHoraInicio: 'asc' };
 
     if (statusQuery) {
@@ -47,17 +50,23 @@ export async function GET(request: Request) {
     }
 
     if (dia) {
-      const dataSelecionada = new Date(`${dia}T00:00:00.000Z`);
-      const proximoDia = new Date(dataSelecionada);
-      proximoDia.setDate(dataSelecionada.getDate() + 1);
-      whereClause.dataHoraInicio = {
-        gte: dataSelecionada,
-        lt: proximoDia,
-      };
+      // Validar formato do dia se necessário
+      try {
+        const dataSelecionada = new Date(`${dia}T00:00:00.000Z`); // Início do dia em UTC
+        if (isNaN(dataSelecionada.getTime())) throw new Error("Data inválida");
+        const proximoDia = new Date(dataSelecionada);
+        proximoDia.setDate(dataSelecionada.getDate() + 1);
+
+        whereClause.AND = [ // Garante que AND seja um array
+          ...(whereClause.AND || []),
+          { dataHoraInicio: { gte: dataSelecionada } },
+          { dataHoraInicio: { lt: proximoDia } },
+        ];
+      } catch (e) {
+        return NextResponse.json({ message: "Formato de dia inválido. Use YYYY-MM-DD." }, { status: 400 });
+      }
     } else if (!incluirPassadas) {
-      // Por padrão, não inclui reservas que já terminaram completamente,
-      // a menos que 'incluirPassadas' seja true ou um dia específico seja consultado.
-      whereClause.dataHoraFim = {
+      whereClause.dataHoraFim = { // Mostrar apenas reservas cujo fim ainda não passou
         gte: new Date()
       };
     }
@@ -70,31 +79,36 @@ export async function GET(request: Request) {
       orderBy: orderByClause,
     });
 
-    // Adicionar um campo virtual para indicar se está "atrasada e pendente de cancelamento"
-    // ou se o admin pode fazer check-in.
-    // Este campo é para o frontend exibir a informação, não altera o BD aqui.
+    // Adicionar campo virtual 'situacaoAdmin'
     const agora = new Date();
     reservas = reservas.map(reserva => {
-      const limiteTolerancia = new Date(new Date(reserva.dataHoraInicio).getTime() + TOLERANCIA_ATRASO_MS);
+      // Certifique-se que reserva.dataHoraInicio é um objeto Date
+      const dataInicio = new Date(reserva.dataHoraInicio);
+      const limiteTolerancia = new Date(dataInicio.getTime() + TOLERANCIA_ATRASO_MS);
       let situacaoAdmin = '';
+
       if (reserva.status === "confirmada") {
         if (agora > limiteTolerancia) {
-          situacaoAdmin = "atrasada_pode_cancelar"; // Cliente muito atrasado
-        } else if (agora >= reserva.dataHoraInicio && agora <= limiteTolerancia) {
-          situacaoAdmin = "pode_fazer_checkin"; // Dentro do horário ou pouca tolerância
+          situacaoAdmin = "atrasada_pode_cancelar";
+        } else if (agora >= dataInicio && agora <= limiteTolerancia) {
+          situacaoAdmin = "pode_fazer_checkin";
+        } else if (agora < dataInicio) {
+          situacaoAdmin = "aguardando_horario";
         }
+      } else if (reserva.status === "check_in_realizado") {
+        situacaoAdmin = "checkin_concluido";
+      } else {
+        situacaoAdmin = reserva.status; // ex: no_show, cancelada_pelo_cliente
       }
       return { ...reserva, situacaoAdmin };
     });
 
-
     return NextResponse.json(reservas);
   } catch (error) {
     console.error("Erro ao buscar reservas:", error);
-    return NextResponse.json({ message: "Erro ao buscar reservas" }, { status: 500 });
+    return NextResponse.json({ message: "Erro ao buscar reservas", errorDetails: String(error) }, { status: 500 });
   }
 }
-
 
 export async function POST(request: Request) {
   try {
@@ -111,13 +125,18 @@ export async function POST(request: Request) {
 
     const [year, month, day] = dataString.split('-').map(Number);
     const [hours, minutes] = hora.split(':').map(Number);
+    // dataHoraInicioProposta será no fuso horário do servidor.
     const dataHoraInicioProposta = new Date(year, month - 1, day, hours, minutes);
 
     if (isNaN(dataHoraInicioProposta.getTime())) {
       return NextResponse.json({ message: "Formato de data ou hora inválido." }, { status: 400 });
     }
     if (dataHoraInicioProposta < new Date()) {
-      return NextResponse.json({ message: "Não é possível fazer reservas para datas ou horas passadas." }, { status: 400 });
+      // Permite um pequeno buffer para evitar erros por milissegundos de diferença
+      const agoraMenosBuffer = new Date(new Date().getTime() - 60000); // 1 minuto de buffer
+       if (dataHoraInicioProposta < agoraMenosBuffer) {
+        return NextResponse.json({ message: "Não é possível fazer reservas para datas ou horas passadas." }, { status: 400 });
+       }
     }
 
     const dataHoraFimProposta = new Date(dataHoraInicioProposta.getTime() + duracaoMs);
@@ -126,17 +145,6 @@ export async function POST(request: Request) {
       where: {
         capacidade: { gte: pessoas },
       },
-      include: { // Incluir reservas para poder filtrar em JS se necessário (embora o ideal seja no BD)
-        reservas: {
-          where: {
-            // Pré-filtro básico para reduzir dados trafegados
-            // Considera apenas reservas que poderiam colidir com a data proposta
-            status: { notIn: ["cancelada_pelo_cliente", "no_show"] }, // Status que definitivamente liberam a mesa
-            dataHoraInicio: { lt: dataHoraFimProposta },
-            dataHoraFim: { gt: dataHoraInicioProposta },
-          }
-        }
-      }
     });
 
     if (mesasComCapacidade.length === 0) {
@@ -146,13 +154,11 @@ export async function POST(request: Request) {
     let mesaAlocada = null;
 
     for (const mesa of mesasComCapacidade) {
-      // Verificar as reservas existentes para ESTA mesa específica
-      const reservasAtivasDaMesa = await prisma.reserva.findMany({
+      const reservasNaMesaPotencialmenteConflitantes = await prisma.reserva.findMany({
         where: {
             mesaId: mesa.id,
-            // Status que ocupam a mesa
-            status: { in: ["confirmada", "check_in_realizado"] },
-            // Condição de sobreposição de horários
+            status: { notIn: ["cancelada_pelo_cliente", "no_show"] }, // Ignora as que já foram explicitamente liberadas
+            // Filtro de sobreposição básica para reduzir o número de reservas a serem verificadas em JS
             AND: [
                 { dataHoraInicio: { lt: dataHoraFimProposta } },
                 { dataHoraFim: { gt: dataHoraInicioProposta } },
@@ -160,21 +166,22 @@ export async function POST(request: Request) {
         }
       });
 
-      // Agora, a parte "inteligente": se uma reserva é 'confirmada' mas já passou da tolerância,
-      // ela não deve ser considerada um conflito para uma *nova* reserva.
-      const conflitosReais = reservasAtivasDaMesa.filter(reservaExistente => {
+      const conflitosReais = reservasNaMesaPotencialmenteConflitantes.filter(reservaExistente => {
+        // Se a reserva existente já teve check-in, é um conflito.
         if (reservaExistente.status === "check_in_realizado") {
-          return true; // Se já tem check-in, ocupa a mesa.
+          return true;
         }
+        // Se a reserva existente é "confirmada"
         if (reservaExistente.status === "confirmada") {
+          // E já passou da tolerância de atraso, não é mais um conflito para uma *nova* reserva.
           if (isReservaLiberadaPorAtraso(reservaExistente)) {
-            // O admin ainda não cancelou, mas para fins de NOVA reserva, consideramos liberada.
-            // O ideal seria o admin atualizar o status para "no_show".
-            return false; // Não é um conflito real para *esta nova* reserva.
+            return false;
           }
-          return true; // 'confirmada' e dentro do tempo, ocupa a mesa.
+          // Se está "confirmada" e dentro do tempo (ou antes), é um conflito.
+          return true;
         }
-        return false; // Outros status não considerados conflito aqui.
+        // Outros status não deveriam chegar aqui devido ao filtro `notIn` acima, mas por segurança:
+        return false;
       });
 
       if (conflitosReais.length === 0) {

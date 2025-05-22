@@ -1,15 +1,14 @@
-// lib/prisma.ts
-import { PrismaClient } from '../app/generated/prisma'; // Caminho relativo de lib/ para app/generated/prisma/
-
-// Ou usando o alias, se o problema não for o alias para este arquivo:
-// import { PrismaClient } from '@/app/generated/prisma';
+// lib/prisma.ts - VERSÃO CORRIGIDA SUGERIDA
+import { PrismaClient } from '@prisma/client'; // Caminho relativo de 'lib/' para 'app/generated/prisma/'
+                                                     // Ou use '@/app/generated/prisma' se o alias estiver funcionando bem aqui.
 
 let prisma: PrismaClient;
 
 if (process.env.NODE_ENV === 'production') {
   prisma = new PrismaClient();
 } else {
-  // Em desenvolvimento, reutilize a instância para evitar muitas conexões
+  // Em desenvolvimento, evite criar múltiplas instâncias do PrismaClient
+  // devido ao Hot Module Replacement (HMR) do Next.js.
   // @ts-ignore
   if (!global.prisma) {
     // @ts-ignore
