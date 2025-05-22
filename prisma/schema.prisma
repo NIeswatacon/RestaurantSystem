@@ -8,22 +8,28 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Mesa {
-  id         Int       @id @default(autoincrement())
-  numero     Int       @unique
-  capacidade Int
-  reservas   Reserva[] // relação 1:N
+model Reserva {
+ id             String   @id @default(cuid())
+  nome           String
+  pessoas        Int
+  mesaId         String
+  mesa           Mesa     @relation(fields: [mesaId], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  dataHoraInicio DateTime
+  dataHoraFim    DateTime
+  status         String   @default("confirmada") // confirmada, check_in_realizado, cancelada_pelo_cliente, no_show
+
+  // usuarioId String? // Se tiver login de usuário
+  // usuario   Usuario? @relation(fields: [usuarioId], references: [id])
 }
 
-model Reserva {
-  id        Int      @id @default(autoincrement())
-  nome      String
-  data      DateTime
-  hora      String
-  pessoas   Int
-  mesaId    Int
-  mesa      Mesa     @relation(fields: [mesaId], references: [id])
-  createdAt DateTime @default(now())
+model Mesa {
+  id         String    @id @default(cuid())
+  numero     Int       @unique
+  capacidade Int
+  reservas   Reserva[]
 }
 
 model CardapioItem {
